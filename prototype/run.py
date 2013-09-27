@@ -10,7 +10,7 @@ import numpy as np
 
 schema_defs = [
 "array1<attr1:double,attr2:int64>[dim1=1:200000,1000,0,dim2=1:200000,1000,0]"
-,"array5<attr1:double,attr2:int64>[dim1=1:100,25,0,dim2=1:100,25,0]"
+,"array5<attr1:int64,attr2:int64>[dim1=1:100,25,0,dim2=1:100,25,0]"
 ,"array6<attr1:double,attr2:int64>[dim1=1:1000,50,0,dim2=1:1000,50,0]"
 #,"array2<attr1:double,attr2:int64>[dim1=1:10,5,0,dim2=0:9,5,0]"
 #,"array4<attr1:double,attr2:int64>[dim1=0:9,5,0,dim2=0:9,5,0]"
@@ -66,11 +66,35 @@ partition_defs = {
 #print "attributes:",attributes
 #print "dimensions:",dimensions
 
-DEFAULT_ALPHA = .74
+DEFAULT_ALPHA = 1.
 DEFAULT_CHUNKSIZE = 100
-DEFAULT_CUTOFF = .95
+DEFAULT_CUTOFF = .8
+
+min_chunksize = .05
+max_chunksize = .5
+z_range = 10
+
+join_alignment = .5
 
 DEFAULT_ZIPF = zipf_variable(DEFAULT_ALPHA,DEFAULT_CHUNKSIZE)
+
+##############################
+'''
+myschema = schema_defs[0]
+myrange1 = 'quarters'
+myrange2 = 'rows'
+'''
+
+myschema = schema_defs[1]
+myrange1 = 'quarters2'
+myrange2 = 'rows2'
+
+'''
+myschema = schema_defs[2]
+myrange1 = 'quarters3'
+myrange2 = 'rows3'
+'''
+##############################
 
 def get_cellcounts(totalchunks,chunksize,distribution=DEFAULT_ZIPF):
   '''
@@ -113,12 +137,6 @@ def build_chunk(Schema,chunk_id,cellcount,chunksize):
   candidates = range(chunksize)
   if cellcount == chunksize:
     return candidates
-  #for i in range(cellcount): # shuffle the first k items
-  #  x = random.randint(i,chunksize-1) #should be possible to stay in place
-  #  temp = candidates[x]
-  #  candidates[x] = candidates[i]
-  #  candidates[i] = temp
-  #chosen = candidates[:cellcount]
   chosen = choose_randk(candidates,cellcount)
   #generate dimension coordinates
   for i in chosen:
@@ -127,18 +145,18 @@ def build_chunk(Schema,chunk_id,cellcount,chunksize):
   #generate attribute values
   attrvals = generate_attributes(Schema.attributes,cellcount)
   chunk.attributes = attrvals
-  print "chosen:",chosen
+  #print "chosen:",chosen
   #print "dimensions for cell",chosen[0],"of chunk",chunk_id,":",Schema.compute_dimid(chunk_id,chosen[0])
-  print "coords for chunk",chunk_id,":",coords
-  print "attributes for chunk",chunk_id,":",attrvals
+  #print "coords for chunk",chunk_id,":",coords
+  #print "attributes for chunk",chunk_id,":",attrvals
   return chunk
 
 def shuffle_firstk(candidates,k):
   '''
-  shuffles the first k items, and returns the resulting list
+  shuffles the first k items, and returns the resulting list. this assumes k < len(candidates)
   '''
   l = len(candidates) - 1
-  for i in range(k): # shuffle the first k items
+  for i in range(min(k,l+1)): # shuffle the first k items
     x = random.randint(i,l) #should be possible to stay in place
     temp = candidates[x]
     candidates[x] = candidates[i]
@@ -177,15 +195,11 @@ def generate_attributes(attributes,cellcount,shift=3):
     result.append(x)
   return result
 
-'''
-myschema = schema_defs[2]
-myrange1 = 'quarters3'
-myrange2 = 'rows3'
-'''
-
-myschema = schema_defs[1]
-myrange1 = 'quarters2'
-myrange2 = 'rows2'
+def map_chunksize(z,minc,maxc,chunksize):
+  global z_range
+  maxc = 1. * maxc * chunksize
+  minc = 1. * minc * chunksize
+  return math.ceil(1. * z / z_range * (maxc - minc) + minc)
 
 # create schema and partition objects
 (name,attributes,dimensions) = parser.ScidbSchema.parse_schema(myschema)
@@ -233,28 +247,43 @@ print "total chunks in",Schema.name,":",totalchunks
 chunksize = Schema.compute_chunksize()
 print "chunk size of",Schema.name,":",chunksize
 #get zipf distribution ready
-z = zipf_variable(DEFAULT_ALPHA,100)
+z = zipf_variable(DEFAULT_ALPHA,z_range)
 #generate cellcounts for each chunk
-(hotchunks,coldchunks) = get_hotcold_cellcounts(totalchunks,100,distribution=z)
+(hotchunks,coldchunks) = get_hotcold_cellcounts(totalchunks,z_range,distribution=z)
 numhot = len(hotchunks)
 numhot_perregion = numhot / total_regions
 hotcounts = [numhot_perregion] * total_regions
 
+#fraction of hot chunks *not* aligned in B
+numnotaligned = int(1. * numhot * join_alignment)
+# divided evenly across all regions
+numnotaligned_perregion = numnotaligned / total_regions
+nonaligncounts = [numnotaligned_perregion] * total_regions
+
 remainder = numhot - total_regions * numhot_perregion
+remainder_nonaligned = numnotaligned - numnotaligned_perregion * total_regions
 for i in range(total_regions):
   if remainder > 0:
     hotcounts[i] +=1
     remainder -= 1
+  if remainder_nonaligned > 0:
+    nonaligncounts[i] +=1
+    remainder_nonaligned -= 1
 
 print "total hot chunks: ",numhot
 print "hot chunks per region:",hotcounts
+print "total chunks *not* aligned in B:",numnotaligned
+print "non-aligned chunks per region:",nonaligncounts
 
 # put all these regions together, doesn't matter because they don't overlap
 regions = overlaps + non_overlaps
 
-hot_index = 0
-cold_index = 0
+hot_indexA = 0
+cold_indexA = 0
+hot_indexB = 0
+cold_indexB = 0
 cellcountsA = [0] * totalchunks # cell counts for all chunks
+cellcountsB = [0] * totalchunks # cell counts for all chunks
 
 #Build array A
 #arrange cellcounts per region:
@@ -262,63 +291,60 @@ for i,region in enumerate(regions):
   #this is a list
   #pick k chunks from this region to be hot
   h = hotcounts[i]
-  k = shuffle_firstk(region,h) #list of chunk indexes with first k shuffled
+  x = nonaligncounts[i]
+  # can actually shuffle first k+x elements here, where x is # hotchunks in array B that should
+  # *not* align with hot chunks in array A for this region
+  k = shuffle_firstk(region,h+x) #list of chunk indexes with first k shuffled
+  regions[i] = k # save this for later for use with array B
   #print "k:",k[:100]
-  print "k:",k
 
-  #first k are made hot
+  #first k are made hot in A
   for j in range(h):
-    cellcountsA[k[j]] = hotchunks[hot_index] #the chunk at index k[j] is now hot
-    print "incrementing hot index"
-    hot_index += 1
+    cellcountsA[k[j]] = hotchunks[hot_indexA] #the chunk at index k[j] is now hot
+    hot_indexA += 1
 
-  #the rest are cold
+  #the rest are cold in A
   for j in range(h,len(k)):
-    cellcountsA[k[j]] = coldchunks[cold_index] #the chunk at index k[j] is now cold
-    print "incrementing cold index"
-    cold_index += 1
+    cellcountsA[k[j]] = coldchunks[cold_indexA] #the chunk at index k[j] is now cold
+    cold_indexA += 1
 
-if (hot_index != len(hotchunks)) or (cold_index != len(coldchunks)):
-  print "hot_index:",hot_index,",hotchunk count:",len(hotchunks)
-  print "cold_index:",cold_index,",coldchunk count:",len(coldchunks)
-  raise Exception("bad math here")
+  for j in (range(h-x)+range(h,h+x)):
+    cellcountsB[k[j]] = hotchunks[hot_indexB]
+    hot_indexB += 1
 
-print "cellcounts for array A:",cellcountsA
+  for j in (range(h-x,h)+range(h+x,len(k))):
+    cellcountsB[k[j]] = coldchunks[cold_indexB]
+    cold_indexB += 1
+
+
+if (hot_indexA != len(hotchunks)) or (cold_indexA != len(coldchunks)):
+  print "hot_indexA:",hot_indexA,",hotchunk count:",len(hotchunks)
+  print "cold_indexA:",cold_indexA,",coldchunk count:",len(coldchunks)
+  raise Exception("bad math here for array A")
+
+if (hot_indexB != len(hotchunks)) or (cold_indexB != len(coldchunks)):
+  print "hot_index:",hot_indexB,",hotchunk count:",len(hotchunks)
+  print "cold_index:",cold_indexB,",coldchunk count:",len(coldchunks)
+  raise Exception("bad math here for array B")
+
+
+#print "raw cellcounts for array A:",cellcountsA,",mean:",np.mean(cellcountsA)
+
+for i in range(1,z_range+1):
+  print str(i)+":",cellcountsA.count(i)
+
+for i,z in enumerate(cellcountsA):
+  cellcountsA[i] = map_chunksize(z,min_chunksize,max_chunksize,chunksize)
+
+#print "new cellcounts for array A:",cellcountsA,",mean:",np.mean(cellcountsA)
+print "mean cellcount:",np.mean(cellcountsA)
 
 #generate and write chunks to disk
-#for i in range(min(3,totalchunks)):
-#  chunk = build_chunk(Schema,i,cellcounts[i],chunksize)
-#  io.write_chunk(chunk,dim_handles,attr_handles,chunkmap_handle)
+for i in range(min(3,totalchunks)):
+  chunk = build_chunk(Schema,i,int(cellcountsA[i]),chunksize)
+  io.write_chunk_binary(chunk,dim_handles,attr_handles,chunkmap_handle)
 
 io.close_handles(dim_handles)
 io.close_handles(attr_handles)
 io.close_handle(chunkmap_handle)
 
-
-'''
-for schema_def in schema_defs: # for each listed schema
-  #reset offset for chunk writing
-  io.reset_offset()
-  #build schema
-  (name,attributes,dimensions) = parser.ScidbSchema.parse_schema(schema_def)
-  Schema = parser.ScidbSchema(name,attributes,dimensions)
-  # prepare file handles
-  (dim_handles,attr_handles,chunkmap_handle) = io.file_setup(Schema,path_prefix='data')
-  totalchunks = Schema.compute_totalchunks()
-  print "total chunks in",Schema.name,":",totalchunks
-  chunksize = Schema.compute_chunksize()
-  print "chunk size of",Schema.name,":",chunksize
-  #get zipf distribution ready
-  z = zipf_variable(DEFAULT_ALPHA,chunksize)
-  #generate cellcounts for each chunk
-  cellcounts = get_cellcounts(totalchunks=totalchunks,chunksize=chunksize,distribution=z)
-  print "cellcounts for",Schema.name,":",cellcounts
-  #generate and write chunks to disk
-  for i in range(min(3,totalchunks)):
-    chunk = build_chunk(Schema,i,cellcounts[i],chunksize)
-    io.write_chunk(chunk,dim_handles,attr_handles,chunkmap_handle)
-
-  io.close_handles(dim_handles)
-  io.close_handles(attr_handles)
-  io.close_handle(chunkmap_handle)
- ''' 
