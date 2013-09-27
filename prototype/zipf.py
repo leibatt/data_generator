@@ -37,7 +37,7 @@ def zipf(alpha,n):
   return zipf_value
 
 def zipf_variable(alpha,n):
-  return lambda: zipf(alpha,n)
+  return lambda: zipf2(alpha,n)
 
 #broken
 def zipf2(alpha,n):
@@ -50,16 +50,16 @@ def zipf2(alpha,n):
     temp = np.power(temp,alpha)
     temp = 1.0 / temp
     c2 = 1.0 / np.sum(temp)
-    temp = c2 / temp
+    #print "c2:",c2,",temp:",temp
+    temp = c2 * temp
     carr[0] = temp[0]
     for i in range(1,n):
-      if (i % 100000) == 0:
-         print "computing step",i
       carr[i] = carr[i-1] + temp[i]
+      #print "carr["+str(i)+"]:",carr[i]
     print "done calculating carr"
 
   z = np.random.uniform(.0000001,1)
   for i in range(1,n+1):
-    if carr[i] >= z:
+    if carr[i-1] >= z:
       return i
       

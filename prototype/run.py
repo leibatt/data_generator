@@ -10,6 +10,8 @@ import numpy as np
 
 schema_defs = [
 "array1<attr1:double,attr2:int64>[dim1=1:200000,1000,0,dim2=1:200000,1000,0]"
+,"array5<attr1:double,attr2:int64>[dim1=1:100,25,0,dim2=1:100,25,0]"
+,"array6<attr1:double,attr2:int64>[dim1=1:1000,50,0,dim2=1:1000,50,0]"
 #,"array2<attr1:double,attr2:int64>[dim1=1:10,5,0,dim2=0:9,5,0]"
 #,"array4<attr1:double,attr2:int64>[dim1=0:9,5,0,dim2=0:9,5,0]"
 #,"array3<attr1:double,attr2:int64>[dim1=1:100,10,0,dim2=0:99,20,0]"
@@ -26,6 +28,25 @@ partition_defs = {
 |1:50001,1,50000,200000\
 |2:100001,1,50000,200000\
 |3:150001,1,50000,200000"
+# quarters
+,'quarters2':"0:1,1,50,50\
+|2:1,51,50,50\
+|1:51,1,50,50\
+|3:51,51,50,50"
+# rows
+,'rows2':"0:1,1,25,100\
+|1:26,1,25,100\
+|2:51,1,25,100\
+|3:76,1,25,100"
+,'quarters3':"0:1,1,500,500\
+|2:1,501,500,500\
+|1:501,1,500,500\
+|3:501,501,500,500"
+# rows
+,'rows3':"0:1,1,250,1000\
+|1:251,1,250,1000\
+|2:501,1,250,1000\
+|3:751,1,250,1000"
 }
 
 #partition_defs = [
@@ -69,19 +90,16 @@ def get_cellcounts(totalchunks,chunksize,distribution=DEFAULT_ZIPF):
     hotchunks.append(val > (DEFAULT_CUTOFF*chunksize))
   return (cellcounts,hotchunks)
 
-def get_hotcold_cellcounts(totalchunks,chunksize,distribution=DEFAULT_ZIPF):
-  hotchunks = 0
-  coldchunks = 0
-  cutoff = DEFAULT_CUTOFF * chunksize
+def get_hotcold_cellcounts(totalchunks,n,distribution=DEFAULT_ZIPF):
+  hotchunks = []
+  coldchunks = []
+  cutoff = DEFAULT_CUTOFF * n
   for i in range(totalchunks):
     val = distribution()
-    if (i % 1000) == 0:
-      print "completed",i,"calculations"
-      print "val:",val
-    if val > cutoff:
-      hotchunks += 1
+    if val >= cutoff:
+      hotchunks.append(val)
     else:
-      coldchunks += 1
+      coldchunks.append(val)
   return (hotchunks,coldchunks)
 
 def build_chunk(Schema,chunk_id,cellcount,chunksize):
@@ -115,6 +133,18 @@ def build_chunk(Schema,chunk_id,cellcount,chunksize):
   print "attributes for chunk",chunk_id,":",attrvals
   return chunk
 
+def shuffle_firstk(candidates,k):
+  '''
+  shuffles the first k items, and returns the resulting list
+  '''
+  l = len(candidates) - 1
+  for i in range(k): # shuffle the first k items
+    x = random.randint(i,l) #should be possible to stay in place
+    temp = candidates[x]
+    candidates[x] = candidates[i]
+    candidates[i] = temp
+  return candidates #return everything
+
 def choose_randk(candidates,k):
   '''
   returns a list of k randomly selected items chosen from the given list
@@ -147,13 +177,22 @@ def generate_attributes(attributes,cellcount,shift=3):
     result.append(x)
   return result
 
+'''
+myschema = schema_defs[2]
+myrange1 = 'quarters3'
+myrange2 = 'rows3'
+'''
+
+myschema = schema_defs[1]
+myrange1 = 'quarters2'
+myrange2 = 'rows2'
 
 # create schema and partition objects
-(name,attributes,dimensions) = parser.ScidbSchema.parse_schema(schema_defs[0])
+(name,attributes,dimensions) = parser.ScidbSchema.parse_schema(myschema)
 Schema = parser.ScidbSchema(name,attributes,dimensions)
-(range_starts,range_widths) = RangePartition.parse(partition_defs['quarters'])
+(range_starts,range_widths) = RangePartition.parse(partition_defs[myrange1])
 range1 = RangePartition(Schema,range_starts,range_widths)
-(range_starts,range_widths) = RangePartition.parse(partition_defs['rows'])
+(range_starts,range_widths) = RangePartition.parse(partition_defs[myrange2])
 range2 = RangePartition(Schema,range_starts,range_widths)
 
 numnodes = max(range1.nodecount,range2.nodecount)
@@ -161,7 +200,6 @@ overlaps = []
 non_overlaps1 = []
 non_overlaps2 = []
 
-'''
 #compute overlap for all nodes
 for i in range(numnodes):
   #print "range1 chunks on node "+str(i)+":",range1.get_chunks(i)
@@ -185,7 +223,6 @@ else:
 total_regions = len(overlaps) + len(non_overlaps)
 
 print total_regions,"total regions of overlap and non-overlap"
-'''
 
 #generate the cellcounts
 io.reset_offset()
@@ -198,10 +235,55 @@ print "chunk size of",Schema.name,":",chunksize
 #get zipf distribution ready
 z = zipf_variable(DEFAULT_ALPHA,100)
 #generate cellcounts for each chunk
-(numhot,numcold) = get_hotcold_cellcounts(totalchunks,100,distribution=z)
-#numhot_pernode = 1.0 * numhot / total_regions
-#print "total hot chunks: ",numhot
-#print "average hot chunks per node:",numhot_pernode
+(hotchunks,coldchunks) = get_hotcold_cellcounts(totalchunks,100,distribution=z)
+numhot = len(hotchunks)
+numhot_perregion = numhot / total_regions
+hotcounts = [numhot_perregion] * total_regions
+
+remainder = numhot - total_regions * numhot_perregion
+for i in range(total_regions):
+  if remainder > 0:
+    hotcounts[i] +=1
+    remainder -= 1
+
+print "total hot chunks: ",numhot
+print "hot chunks per region:",hotcounts
+
+# put all these regions together, doesn't matter because they don't overlap
+regions = overlaps + non_overlaps
+
+hot_index = 0
+cold_index = 0
+cellcountsA = [0] * totalchunks # cell counts for all chunks
+
+#Build array A
+#arrange cellcounts per region:
+for i,region in enumerate(regions):
+  #this is a list
+  #pick k chunks from this region to be hot
+  h = hotcounts[i]
+  k = shuffle_firstk(region,h) #list of chunk indexes with first k shuffled
+  #print "k:",k[:100]
+  print "k:",k
+
+  #first k are made hot
+  for j in range(h):
+    cellcountsA[k[j]] = hotchunks[hot_index] #the chunk at index k[j] is now hot
+    print "incrementing hot index"
+    hot_index += 1
+
+  #the rest are cold
+  for j in range(h,len(k)):
+    cellcountsA[k[j]] = coldchunks[cold_index] #the chunk at index k[j] is now cold
+    print "incrementing cold index"
+    cold_index += 1
+
+if (hot_index != len(hotchunks)) or (cold_index != len(coldchunks)):
+  print "hot_index:",hot_index,",hotchunk count:",len(hotchunks)
+  print "cold_index:",cold_index,",coldchunk count:",len(coldchunks)
+  raise Exception("bad math here")
+
+print "cellcounts for array A:",cellcountsA
 
 #generate and write chunks to disk
 #for i in range(min(3,totalchunks)):
