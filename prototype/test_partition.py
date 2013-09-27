@@ -1,7 +1,6 @@
 import schema_parser as parser
 from partition import Partition #do I need this?
 from range_partition import RangePartition
-import chunk_util as cutil
 
 schema_defs = [
 "array1<attr1:double,attr2:int64>[dim1=1:100,25,0,dim2=1:100,25,0]"

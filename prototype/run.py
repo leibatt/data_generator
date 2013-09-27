@@ -4,9 +4,12 @@ import math
 import random
 import io # located in io.py
 from chunk import Chunk
+from partition import Partition #do I need this?
+from range_partition import RangePartition
+import numpy as np
 
 schema_defs = [
-"array1<attr1:double,attr2:int64>[dim1=1:100,25,0,dim2=1:100,25,0]"
+"array1<attr1:double,attr2:int64>[dim1=1:200000,1000,0,dim2=1:200000,1000,0]"
 #,"array2<attr1:double,attr2:int64>[dim1=1:10,5,0,dim2=0:9,5,0]"
 #,"array4<attr1:double,attr2:int64>[dim1=0:9,5,0,dim2=0:9,5,0]"
 #,"array3<attr1:double,attr2:int64>[dim1=1:100,10,0,dim2=0:99,20,0]"
@@ -14,15 +17,15 @@ schema_defs = [
 
 partition_defs = {
 # quarters
-'quarters':"0:1,1,50,50\
-|2:1,51,50,50\
-|1:51,1,50,50\
-|3:51,51,50,50"
+'quarters':"0:1,1,100000,100000\
+|2:1,100001,100000,100000\
+|1:100001,1,100000,100000\
+|3:100001,100001,100000,100000"
 # rows
-,'rows':"0:1,1,25,100\
-|1:26,1,25,100\
-|2:51,1,25,100\
-|3:76,1,25,100"
+,'rows':"0:1,1,50000,200000\
+|1:50001,1,50000,200000\
+|2:100001,1,50000,200000\
+|3:150001,1,50000,200000"
 }
 
 #partition_defs = [
@@ -42,7 +45,7 @@ partition_defs = {
 #print "attributes:",attributes
 #print "dimensions:",dimensions
 
-DEFAULT_ALPHA = 2 #.74
+DEFAULT_ALPHA = .74
 DEFAULT_CHUNKSIZE = 100
 DEFAULT_CUTOFF = .95
 
@@ -67,15 +70,18 @@ def get_cellcounts(totalchunks,chunksize,distribution=DEFAULT_ZIPF):
   return (cellcounts,hotchunks)
 
 def get_hotcold_cellcounts(totalchunks,chunksize,distribution=DEFAULT_ZIPF):
-  hotchunks = []
-  coldchunks = []
+  hotchunks = 0
+  coldchunks = 0
   cutoff = DEFAULT_CUTOFF * chunksize
   for i in range(totalchunks):
     val = distribution()
+    if (i % 1000) == 0:
+      print "completed",i,"calculations"
+      print "val:",val
     if val > cutoff:
-      hotchunks.append(val)
+      hotchunks += 1
     else:
-      coldchunks.append(val)
+      coldchunks += 1
   return (hotchunks,coldchunks)
 
 def build_chunk(Schema,chunk_id,cellcount,chunksize):
@@ -155,6 +161,7 @@ overlaps = []
 non_overlaps1 = []
 non_overlaps2 = []
 
+'''
 #compute overlap for all nodes
 for i in range(numnodes):
   #print "range1 chunks on node "+str(i)+":",range1.get_chunks(i)
@@ -178,12 +185,10 @@ else:
 total_regions = len(overlaps) + len(non_overlaps)
 
 print total_regions,"total regions of overlap and non-overlap"
+'''
 
 #generate the cellcounts
 io.reset_offset()
-#build schema
-(name,attributes,dimensions) = parser.ScidbSchema.parse_schema(schema_def)
-Schema = parser.ScidbSchema(name,attributes,dimensions)
 # prepare file handles
 (dim_handles,attr_handles,chunkmap_handle) = io.file_setup(Schema,path_prefix='data')
 totalchunks = Schema.compute_totalchunks()
@@ -191,14 +196,17 @@ print "total chunks in",Schema.name,":",totalchunks
 chunksize = Schema.compute_chunksize()
 print "chunk size of",Schema.name,":",chunksize
 #get zipf distribution ready
-z = zipf_variable(DEFAULT_ALPHA,chunksize)
+z = zipf_variable(DEFAULT_ALPHA,100)
 #generate cellcounts for each chunk
-cellcounts = get_cellcounts(totalchunks=totalchunks,chunksize=chunksize,distribution=z)
-print "cellcounts for",Schema.name,":",cellcounts
+(numhot,numcold) = get_hotcold_cellcounts(totalchunks,100,distribution=z)
+#numhot_pernode = 1.0 * numhot / total_regions
+#print "total hot chunks: ",numhot
+#print "average hot chunks per node:",numhot_pernode
+
 #generate and write chunks to disk
-for i in range(min(3,totalchunks)):
-  chunk = build_chunk(Schema,i,cellcounts[i],chunksize)
-  io.write_chunk(chunk,dim_handles,attr_handles,chunkmap_handle)
+#for i in range(min(3,totalchunks)):
+#  chunk = build_chunk(Schema,i,cellcounts[i],chunksize)
+#  io.write_chunk(chunk,dim_handles,attr_handles,chunkmap_handle)
 
 io.close_handles(dim_handles)
 io.close_handles(attr_handles)
