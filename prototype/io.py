@@ -54,7 +54,10 @@ def write_dimvals(chunk,dim_handles,chunkmap_handle,aorb='A'):
   chunkmap_handle.write(','.join([str(chunk_id),str(o),str(chunk.cellcount)]))
   chunkmap_handle.write('\n')
   # do not close handles!!!
-  offset += chunk.cellcount
+  if aorb == 'A':
+    offset += chunk.cellcount
+  else:
+    offsetB += chunk.cellcount
 
 def reset_offset(aorb='A'):
   global offset
@@ -92,13 +95,13 @@ def write_attrvals(chunk,attr_handles):
   # do not write to chunkmap!
   # do not close handles!
 
-def write_chunk(chunk,dim_handles,attr_handles,chunkmap_handle):
-  print "writing chunk"
-  write_dimvals(chunk,dim_handles,chunkmap_handle)
+def write_chunk(chunk,dim_handles,attr_handles,chunkmap_handle,aorb='A'):
+  #print "writing chunk"
+  write_dimvals(chunk,dim_handles,chunkmap_handle,aorb=aorb)
   write_attrvals(chunk,attr_handles)
 
 def write_chunk_binary(chunk,dim_handles,attr_handles,chunkmap_handle):
-  print "writing chunk"
+  #print "writing chunk"
   write_dimvals_binary(chunk,dim_handles,chunkmap_handle)
   write_attrvals_binary(chunk,attr_handles)
   

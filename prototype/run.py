@@ -14,7 +14,7 @@ schema_defs = [
 ,"array6<attr1:double,attr2:int64>[dim1=1:1000,50,0,dim2=1:1000,50,0]"
 #,"array2<attr1:double,attr2:int64>[dim1=1:10,5,0,dim2=0:9,5,0]"
 #,"array4<attr1:double,attr2:int64>[dim1=0:9,5,0,dim2=0:9,5,0]"
-#,"array3<attr1:double,attr2:int64>[dim1=1:100,10,0,dim2=0:99,20,0]"
+,"array3<attr1:int64>[dim1=1:100,10,0,dim2=1:100,10,0]"
 ]
 
 partition_defs = {
@@ -47,6 +47,17 @@ partition_defs = {
 |1:251,1,250,1000\
 |2:501,1,250,1000\
 |3:751,1,250,1000"
+# quarters
+,'quarters4':"0:1,1,50,50\
+|2:1,51,50,50\
+|1:51,1,50,50\
+|3:51,51,50,50"
+# rows
+,'rows4':"0:1,1,30,100\
+|1:31,1,20,100\
+|2:51,1,30,100\
+|3:81,1,20,100"
+
 }
 
 #partition_defs = [
@@ -85,34 +96,23 @@ myrange1 = 'quarters'
 myrange2 = 'rows'
 '''
 
+'''
 myschema = schema_defs[1]
 myrange1 = 'quarters2'
 myrange2 = 'rows2'
+'''
 
 '''
 myschema = schema_defs[2]
 myrange1 = 'quarters3'
 myrange2 = 'rows3'
 '''
+
+myschema = schema_defs[3]
+myrange1 = 'quarters4'
+myrange2 = 'rows4'
+
 ##############################
-
-def get_cellcounts(totalchunks,chunksize,distribution=DEFAULT_ZIPF):
-  '''
-  Create an array that generates the cell count for the given number of chunks using the given
-  distribution
-
-  Arguments:
-    totalchunks  -- the number of chunks to generate cell counts for
-    distribution -- a function representing a random variable with the desired distribution for the
-                    cell counts (i.e. zipf, gaussian, uniform, etc.). Will be zipf by default
-  '''
-  cellcounts = []
-  hotchunks = []
-  for i in range(totalchunks):
-    val = distribution()
-    cellcounts.append(val)
-    hotchunks.append(val > (DEFAULT_CUTOFF*chunksize))
-  return (cellcounts,hotchunks)
 
 def get_hotcold_cellcounts(totalchunks,n,distribution=DEFAULT_ZIPF):
   hotchunks = []
@@ -125,6 +125,31 @@ def get_hotcold_cellcounts(totalchunks,n,distribution=DEFAULT_ZIPF):
     else:
       coldchunks.append(val)
   return (hotchunks,coldchunks)
+
+def build_ABchunks(Schema,chunk_id,countA,countB,chunksize,overlap=1.):
+  maxcount = max(countA,countB)
+  mincount = min(countA,countB)
+  # build the maxchunk from scratch
+  maxchunk = build_chunk(Schema,chunk_id,maxcount,chunksize)
+  if maxcount == mincount: # they are the same, so stop here
+    return (maxchunk,maxchunk)
+  attrlen = len(Schema.attributes)
+  minchunk = Chunk(Schema,chunk_id,mincount,[],[[]]*attrlen) # empty chunk for now
+  minitems = choose_randk(range(maxcount),mincount) # copy random subset of the larger chunk
+
+  # copy the selected cells from maxchunk to minchunk
+  for i in minitems:
+    minchunk.coordinates.append(maxchunk.coordinates[i])
+    for j in range(attrlen):
+      minchunk.attributes[j].append(maxchunk.attributes[j][i])
+  if countA > countB:
+    chunkA = maxchunk
+    chunkB = minchunk
+  else:
+    chunkA = minchunk
+    chunkB = maxchunk
+  return (chunkA,chunkB)
+  
 
 def build_chunk(Schema,chunk_id,cellcount,chunksize):
   chosen = []
@@ -156,7 +181,7 @@ def shuffle_firstk(candidates,k):
   shuffles the first k items, and returns the resulting list. this assumes k < len(candidates)
   '''
   l = len(candidates) - 1
-  for i in range(min(k,l+1)): # shuffle the first k items
+  for i in range(k): # shuffle the first k items
     x = random.randint(i,l) #should be possible to stay in place
     temp = candidates[x]
     candidates[x] = candidates[i]
@@ -240,8 +265,10 @@ print total_regions,"total regions of overlap and non-overlap"
 
 #generate the cellcounts
 io.reset_offset()
+io.reset_offset(aorb='B')
 # prepare file handles
-(dim_handles,attr_handles,chunkmap_handle) = io.file_setup(Schema,path_prefix='data')
+(dim_handlesA,attr_handlesA,chunkmap_handleA) = io.file_setup(Schema,path_prefix='data')
+(dim_handlesB,attr_handlesB,chunkmap_handleB) = io.file_setup(Schema,aorb='B',path_prefix='data')
 totalchunks = Schema.compute_totalchunks()
 print "total chunks in",Schema.name,":",totalchunks
 chunksize = Schema.compute_chunksize()
@@ -333,18 +360,28 @@ if (hot_indexB != len(hotchunks)) or (cold_indexB != len(coldchunks)):
 for i in range(1,z_range+1):
   print str(i)+":",cellcountsA.count(i)
 
-for i,z in enumerate(cellcountsA):
-  cellcountsA[i] = map_chunksize(z,min_chunksize,max_chunksize,chunksize)
+for i in range(totalchunks):
+  cellcountsA[i] = map_chunksize(cellcountsA[i],min_chunksize,max_chunksize,chunksize)
+  cellcountsB[i] = map_chunksize(cellcountsB[i],min_chunksize,max_chunksize,chunksize)
 
-#print "new cellcounts for array A:",cellcountsA,",mean:",np.mean(cellcountsA)
-print "mean cellcount:",np.mean(cellcountsA)
+print "new cellcounts for array A:",cellcountsA,",mean:",np.mean(cellcountsA)
+print "regions:",regions
+print "totalchunks:",totalchunks
+#print "mean cellcount:",np.mean(cellcountsA)
 
 #generate and write chunks to disk
-for i in range(min(3,totalchunks)):
-  chunk = build_chunk(Schema,i,int(cellcountsA[i]),chunksize)
-  io.write_chunk_binary(chunk,dim_handles,attr_handles,chunkmap_handle)
+for i in range(totalchunks):
+  (chunkA,chunkB) = build_ABchunks(Schema,i,int(cellcountsA[i]),int(cellcountsB[i]),chunksize)
+  #chunk = build_chunk(Schema,i,int(cellcountsA[i]),chunksize)
+  #io.write_chunk_binary(chunkA,dim_handlesA,attr_handlesA,chunkmap_handleA)
+  io.write_chunk(chunkA,dim_handlesA,attr_handlesA,chunkmap_handleA)
+  #io.write_chunk_binary(chunkB,dim_handlesB,attr_handlesB,chunkmap_handleB)
+  io.write_chunk(chunkB,dim_handlesB,attr_handlesB,chunkmap_handleB,aorb='B')
 
-io.close_handles(dim_handles)
-io.close_handles(attr_handles)
-io.close_handle(chunkmap_handle)
+io.close_handles(dim_handlesA)
+io.close_handles(attr_handlesA)
+io.close_handle(chunkmap_handleA)
+io.close_handles(dim_handlesB)
+io.close_handles(attr_handlesB)
+io.close_handle(chunkmap_handleB)
 
